@@ -1,6 +1,7 @@
 import matplotlib
 from matplotlib import pyplot as plt
 import json
+import sys
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -15,9 +16,15 @@ from data import Dataset, load_dataset
 import os
 from model import RoofEnsemble, RoofNet
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '2, 3'
+# Set cuda 10.1
+os.environ['PATH'] = '{}:{}'.format('/usr/local/cuda-10.1/bin', os.environ['PATH'])
+os.environ['LD_LIBRARY_PATH'] = '{}:{}'.format('/usr/local/cuda-10.1/lib64', os.environ['LD_LIBRARY_PATH'])
 
-def train(args, model, device, train_loader, weights, optimizer, epoch):
+print(os.system('nvcc --version'))
+
+#os.environ['CUDA_VISIBLE_DEVICES'] = '0,3'
+
+def train(args, model, device, train_loader, optimizer, epoch, weights=None):
     model.train()
     train_loss = 0
     correct = 0
@@ -25,8 +32,9 @@ def train(args, model, device, train_loader, weights, optimizer, epoch):
         data1, data2, data3, target = data1.to(device), data2.to(device), data3.to(device), target.to(device)
         optimizer.zero_grad()
         output = model(data1, data2, data3)
+        #output = model(data1)
         #loss = F.nll_loss(output, target)     
-        loss = F.cross_entropy(output, target, weight=weights)
+        loss = F.cross_entropy(output, target, weight=weights, reduction='mean')
         train_loss += loss.item()
         loss.backward()
         optimizer.step()
@@ -38,37 +46,36 @@ def train(args, model, device, train_loader, weights, optimizer, epoch):
             epoch, batch_idx * len(data1), len(train_loader.dataset),
             100. * batch_idx / len(train_loader), loss.item()))
         
-    avg_loss = train_loss / (batch_idx+1)
-    acc = 100. * correct / len(train_loader.dataset)
+    avg_train_loss = train_loss / len(train_loader) # reduction='mean', then divide by batch number
+    train_acc = 100. * correct / len(train_loader.dataset)
 
-    return avg_loss, acc
+    print('\nTrain set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)'.format(
+    avg_train_loss, correct, len(train_loader.dataset), train_acc))  
 
-def test(args, model, device, test_loader, weights):
+    return avg_train_loss, train_acc
+
+def test(args, model, device, test_loader, weights=None):
     model.eval()
     test_loss = 0
     correct = 0
     with torch.no_grad():
-        batch_count = 0
-        for (data1, data2, data3, target, _) in test_loader:
-            batch_count += 1
+        for batch_idx, (data1, data2, data3, target, _) in enumerate(test_loader):
             data1, data2, data3, target = data1.to(device), data2.to(device), data3.to(device), target.to(device)
             output = model(data1, data2, data3)
+            #output = model(data1)
             #test_loss += F.nll_loss(output, target, reduction='sum').item() 
             loss = F.cross_entropy(output, target, weight=weights, reduction='sum')
             test_loss += loss.item() 
             pred = output.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum().item()
             
-    test_loss /= len(test_loader.dataset)
+    avg_test_loss = test_loss / len(test_loader.dataset) # reduction='sum', then divide by the full dataset
+    test_acc = 100. * correct / len(test_loader.dataset)
 
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-    test_loss, correct, len(test_loader.dataset),
-    100. * correct / len(test_loader.dataset)))
+    print('Test set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+    avg_test_loss, correct, len(test_loader.dataset), test_acc))   
 
-    avg_loss = test_loss / batch_count
-    acc = 100. * correct / len(test_loader.dataset)
-
-    return avg_loss, acc
+    return avg_test_loss, test_acc
 
 def main():
     # Training settings
@@ -92,6 +99,7 @@ def main():
     args = parser.parse_args()
 
     use_cuda = not args.no_cuda and torch.cuda.is_available()
+    #print(torch.cuda.is_available())
     
     #torch.manual_seed(args.seed)
 
@@ -108,14 +116,27 @@ def main():
 
     # Dataset loading and splitting
     data, weights = load_dataset(data_type = 'train', verified = True)
-    full_dataset = Dataset(data, preprocessing)
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
+    validation_split = .05
+    random_seed= 42
+    shuffle_dataset = True
+
+    # Creating data indices for training and validation splits:
+    dataset_size = len(data)
+    split = int(np.floor(validation_split * dataset_size))
+    # Shuffle data
+    if shuffle_dataset :
+        np.random.seed(random_seed)
+        np.random.shuffle(data)
+    train_data, val_data = data[split:], data[:split]   
+    train_dataset, val_dataset = Dataset(train_data, preprocessing), Dataset(val_data, preprocessing, train = False)
+    #full_dataset = Dataset(data, preprocessing)
+    #train_size = int(0.8 * len(full_dataset))
+    #val_size = len(full_dataset) - train_size
+    #train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
 
     # Setting batch data loaders
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True, **kwargs)
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=64, shuffle=True, **kwargs)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=True, **kwargs)
 
     # Creating model and loading on gpu
     #model = RoofNet().to(device)
@@ -132,11 +153,11 @@ def main():
     weights = torch.from_numpy(weights).to(device)
 
     best = 100
-    writer = SummaryWriter(log_dir='./logs', flush_secs=10)
+    writer = SummaryWriter(log_dir='./logs/5', max_queue=1) # max_queue=1 to flush data at every add
 
     # Training and testing phase
     for epoch in range(1, args.epochs + 1):
-        train_loss, train_acc = train(args, model, device, train_loader, weights, optimizer, epoch)
+        train_loss, train_acc = train(args, model, device, train_loader, optimizer, epoch, weights)
         val_loss, test_acc = test(args, model, device, val_loader, weights)
         if val_loss < best:
             torch.save(model.module.state_dict(), 'roof_cnn_best.pt')

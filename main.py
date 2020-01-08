@@ -45,7 +45,7 @@ if __name__ == '__main__':
 
     # Dataset loading and splitting
     data, _ = load_dataset(data_type = 'test')
-    full_dataset = Dataset(data, preprocessing)
+    full_dataset = Dataset(data, preprocessing, train = False)
 
     # Setting batch data loaders
     test_loader = torch.utils.data.DataLoader(full_dataset, batch_size=1, shuffle=True, **kwargs)
@@ -53,6 +53,7 @@ if __name__ == '__main__':
     model = RoofEnsemble().to(device)    
     model.load_state_dict(torch.load('roof_cnn_best.pt'))
     model = nn.DataParallel(model)
+    model.eval()
     
 
     # Save prediction on csv

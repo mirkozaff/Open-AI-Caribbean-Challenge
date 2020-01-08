@@ -21,10 +21,11 @@ DATA_PATH = '/mnt/data1/zaffaroni_data/competitions_data/DRIVENDATA/'
 
 class Dataset(data.Dataset):
         'Characterizes a dataset for PyTorch'
-        def __init__(self, dataset, transform = None):
+        def __init__(self, dataset, transform = None, train = True):
             'Initialization'
             self.dataset = dataset         
             self.transform = transform 
+            self.train = train
             #self.shuffle_data()
 
         def shuffle_data(self):   
@@ -48,24 +49,29 @@ class Dataset(data.Dataset):
             roof_coords = torch.tensor(poly.centroid.coords[0], dtype=torch.float)
 
             # Crop images from GEOtiff
-            image, _ = mask(self.tiff, [poly], crop=True, pad=True, filled=True, pad_width=1)
-            image_context, _ = mask(self.tiff, [poly], crop=True, pad=True, filled=True, pad_width=250)
+            image_roof, _ = mask(self.tiff, [poly], crop=True, pad=True, filled=True, pad_width=1)
+            image_full, _ = mask(self.tiff, [poly], crop=True, pad=True, filled=False, pad_width=1)
             
-            image = cv2.cvtColor(image.transpose(1, 2, 0), cv2.COLOR_RGBA2RGB)
-            image_context = cv2.cvtColor(image_context.transpose(1, 2, 0), cv2.COLOR_RGBA2RGB)
+            image_roof = cv2.cvtColor(image_roof.transpose(1, 2, 0), cv2.COLOR_RGBA2RGB)
+            image_full = cv2.cvtColor(image_full.transpose(1, 2, 0), cv2.COLOR_RGBA2RGB)
 
+            image_context = image_full - image_roof
+            
             # Convert to PIL Image
-            image = Image.fromarray(image)
+            image_roof = Image.fromarray(image_roof)
             image_context = Image.fromarray(image_context)
+            #image_full = Image.fromarray(image_full)
             
             # Data agumentation
-            image, image_context = apply_randomTransform(image, image_context)
+            if self.train:
+                image_roof, image_context = apply_randomTransform(image_roof, image_context)
 
             if self.transform is not None:
-                image = self.transform(image)
+                image_roof = self.transform(image_roof)
                 image_context = self.transform(image_context)
+                #image_full = self.transform(image_full)
                   
-            return image, image_context, roof_coords, y, roof_id 
+            return image_roof, image_context, roof_coords, y, roof_id 
 
 
 def load_dataset(data_type, verified = True):
@@ -122,55 +128,60 @@ def load_dataset(data_type, verified = True):
 
 def apply_randomTransform(image_left, image_right, size=(224,224)):
     
+    # Resize
+    resize = transforms.Resize(size=size)
+    image_left = resize(image_left)
+    image_right = resize(image_right)
+
+    # Random crop
+    #if random.random() > 0.5:
+    #    i, j, h, w = transforms.RandomCrop.get_params(image_left, output_size=(224, 224))
+    #   image_left = TF.crop(image_left, i, j, h, w)
+    #   image_right = TF.crop(image_right, i, j, h, w)
+
+    # Random horizontal flipping
     if random.random() > 0.5:
-        # Resize
-        resize = transforms.Resize(size=size)
-        image_left = resize(image_left)
-        image_right = resize(image_right)
+        image_left = TF.hflip(image_left)
+        image_right = TF.hflip(image_right)
 
-        
-        # Random crop
-        if random.random() > 0.5:
-            i, j, h, w = transforms.RandomCrop.get_params(image_left, output_size=(224, 224))
-            image_left = TF.crop(image_left, i, j, h, w)
-            image_right = TF.crop(image_right, i, j, h, w)
+    # Random vertical flipping
+    if random.random() > 0.5:
+        image_left = TF.vflip(image_left)
+        image_right = TF.vflip(image_right)
 
-        # Random horizontal flipping
-        if random.random() > 0.5:
-            image_left = TF.hflip(image_left)
-            image_right = TF.hflip(image_right)
+    # Random rotation
+    if random.random() > 0.5:
+        angle = random.randint(0, 360)
+        image_left = TF.rotate(image_left, angle)
+        image_right = TF.rotate(image_right, angle)
 
-        # Random vertical flipping
-        if random.random() > 0.5:
-            image_left = TF.vflip(image_left)
-            image_right = TF.vflip(image_right)
+    # Random grayscale
+    # if random.random() > 0.5:
+    #     image_left = TF.to_grayscale(image_left, 3)
+    #     image_right = TF.to_grayscale(image_right, 3)
 
-        # Random rotation
-        if random.random() > 0.5:
-            angle = random.randint(-180, 180)
-            image_left = TF.rotate(image_left, angle)
-            image_right = TF.rotate(image_right, angle)
+    # Random scale
+    if random.random() > 0.5:
+        scale = random.uniform(0.2, 2)
+        image_left = TF.affine(image_left, angle = 0, translate= (0,0), scale=scale, shear=0)
+        image_right = TF.affine(image_right, angle = 0, translate= (0,0), scale=scale, shear=0)
 
-        # Random grayscale
-        if random.random() > 0.5:
-            image_left = TF.to_grayscale(image_left, 3)
-            image_right = TF.to_grayscale(image_right, 3)
-
-        # Random scale
-        if random.random() > 0.5:
-            scale = random.random()
-            image_left = TF.affine(image_left, angle = 0, translate= (0,0), scale=scale, shear= 0)
-            image_right = TF.affine(image_right, angle = 0, translate= (0,0), scale=scale, shear= 0)
+    # Random shear
+    if random.random() > 0.5:
+        shear = random.randint(-180, 180)
+        image_left = TF.affine(image_left, angle = 0, translate= (0,0), scale=1, shear=shear)
+        image_right = TF.affine(image_right, angle = 0, translate= (0,0), scale=1, shear=shear)
 
     return image_left, image_right
 
 def class_weights(class_count):
 
+    base_weights = np.ones(len(class_count))
     class_array = np.array(class_count)
     class_freq = class_array/class_array.sum()
     inverse_class_freq = 1/class_freq
 
-    weights = inverse_class_freq/inverse_class_freq.sum()
+    freq_weights = inverse_class_freq/inverse_class_freq.sum()
 
-    return np.round(weights, 2).astype(np.float32)
+    return np.round(base_weights + freq_weights*10, 2).astype(np.float32)
 
